@@ -20,6 +20,23 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
+# --- Pre-compiled regex patterns (avoids recompilation on every call) ---
+_RE_NUMBER = re.compile(r'(\d[\d,]*)')
+_RE_PROPERTY_PATH = re.compile(r'/properties/[a-zA-Z0-9]')
+_RE_VIEW_SPLIT = re.compile(r'(?:View OM|View Flyer|View Details)\s*·?\s*')
+_RE_BED = re.compile(r'(\d+)[\s-]*(?:bed|licensed\s*bed)', re.IGNORECASE)
+_RE_UNIT = re.compile(r'(\d+)[\s-]*unit', re.IGNORECASE)
+_RE_CAP = re.compile(r'([\d.]+)\s*%?\s*cap', re.IGNORECASE)
+_RE_PRICE = re.compile(r'\$[\d,]+')
+_RE_ADDR_ZIP = re.compile(r',\s*[A-Z]{2}\s+\d{5}')
+_RE_ADDR_STATE = re.compile(r',\s*[A-Z]{2}\s*$')
+_RE_SQFT_CHECK = re.compile(r'[\d,]+\s*(?:sqft|sq\s*ft|sf)\b', re.IGNORECASE)
+_RE_SQFT_EXTRACT = re.compile(r'([\d,]+)\s*(?:sqft|sq\s*ft|sf)', re.IGNORECASE)
+_RE_PHONE = re.compile(r'\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}')
+_RE_EMAIL = re.compile(r'[\w.+-]+@[\w-]+\.[\w.]+')
+_RE_STARTS_WITH_DIGIT = re.compile(r'^[\d(+]')
+_RE_FULL_ADDR = re.compile(r'(\d+[^,\n]+,\s*[A-Za-z\s]+,\s*[A-Z]{2}\s+\d{5})')
+_RE_BED_DETAIL = re.compile(r'(\d+)[\s-]*(?:bed|licensed)', re.IGNORECASE)
 
 # --- Configuration ---
 MIN_BEDS = 50
@@ -158,12 +175,16 @@ def navigate(page, url):
         page.goto(url, wait_until="domcontentloaded", timeout=30000)
     except PWTimeout:
         print(f"  Page load timeout, continuing...")
-    time.sleep(4)
+    # Wait for network to settle instead of a fixed 4s sleep
+    try:
+        page.wait_for_load_state("networkidle", timeout=8000)
+    except PWTimeout:
+        pass
     wait_for_captcha(page)
-    time.sleep(2)
+    time.sleep(1)
 
 
-def scroll_page(page, times=5, delay=2):
+def scroll_page(page, times=5, delay=1):
     for _ in range(times):
         page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         time.sleep(delay)
@@ -172,7 +193,7 @@ def scroll_page(page, times=5, delay=2):
 def extract_number(text):
     if not text:
         return 0
-    m = re.search(r'(\d[\d,]*)', str(text))
+    m = _RE_NUMBER.search(str(text))
     if m:
         try:
             return int(m.group(1).replace(",", ""))
@@ -183,8 +204,12 @@ def extract_number(text):
 
 def scrape_search_page(page, state=""):
     listings = []
-    time.sleep(4)
-    scroll_page(page, times=8, delay=2)
+    # Wait for network to settle instead of fixed 4s sleep
+    try:
+        page.wait_for_load_state("networkidle", timeout=6000)
+    except PWTimeout:
+        pass
+    scroll_page(page, times=5, delay=1)
 
     try:
         body_text = page.inner_text("body")
@@ -220,7 +245,7 @@ def scrape_search_page(page, state=""):
             seen = set()
             for a in all_links:
                 href = a.get_attribute("href") or ""
-                if re.search(r'/properties/[a-zA-Z0-9]', href) and href not in seen:
+                if _RE_PROPERTY_PATH.search(href) and href not in seen:
                     if any(skip in href for skip in [
                         "Senior-Living", "?types=", "?propertyTypes=",
                         "/properties?", "propertyUseTypes"
@@ -277,7 +302,7 @@ def scrape_search_page(page, state=""):
     else:
         print("  No card elements found. Parsing full page text...")
         save_debug(page, body_text)
-        blocks = re.split(r'(?:View OM|View Flyer|View Details)\s*·?\s*', body_text)
+        blocks = _RE_VIEW_SPLIT.split(body_text)
         for block in blocks:
             block = block.strip()
             if len(block) > 20 and ("$" in block or "bed" in block.lower() or "unit" in block.lower()):
@@ -312,35 +337,35 @@ def parse_listing_text(text, link="", state=""):
     cap_rate = ""
     full_text = text.lower()
 
-    bed_match = re.search(r'(\d+)[\s-]*(?:bed|licensed\s*bed)', full_text)
+    bed_match = _RE_BED.search(full_text)
     if bed_match:
         beds = int(bed_match.group(1))
 
-    unit_match = re.search(r'(\d+)[\s-]*unit', full_text)
+    unit_match = _RE_UNIT.search(full_text)
     if unit_match:
         units = int(unit_match.group(1))
 
-    cap_match = re.search(r'([\d.]+)\s*%?\s*cap', full_text)
+    cap_match = _RE_CAP.search(full_text)
     if cap_match:
         cap_rate = cap_match.group(1) + "% CAP"
 
+    _SKIP_PHRASES = {"view om", "view flyer", "view details", "save search",
+                     "sign up", "log in", "show map", "clear filters",
+                     "results per page", "save my search", "see new listings"}
     for line in lines:
         ll = line.lower().strip()
-        if any(skip in ll for skip in ["view om", "view flyer", "view details",
-                                         "save search", "sign up", "log in",
-                                         "show map", "clear filters", "results per page",
-                                         "save my search", "see new listings"]):
+        if any(skip in ll for skip in _SKIP_PHRASES):
             continue
-        if re.search(r'\$[\d,]+', line) and not price:
+        if _RE_PRICE.search(line) and not price:
             price = line.strip()
         elif "unpriced" in ll and not price:
             price = "Unpriced / Contact Broker"
-        elif re.search(r',\s*[A-Z]{2}\s+\d{5}', line) and not address:
+        elif _RE_ADDR_ZIP.search(line) and not address:
             address = line.strip()
-        elif re.search(r',\s*[A-Z]{2}\s*$', line) and not address:
+        elif _RE_ADDR_STATE.search(line) and not address:
             address = line.strip()
-        elif re.search(r'[\d,]+\s*(sqft|sq\s*ft|sf)\b', ll) and not sqft:
-            sf_match = re.search(r'([\d,]+)\s*(sqft|sq\s*ft|sf)', ll)
+        elif _RE_SQFT_CHECK.search(ll) and not sqft:
+            sf_match = _RE_SQFT_EXTRACT.search(ll)
             if sf_match:
                 sqft = sf_match.group(1) + " SF"
         elif any(k in ll for k in ["assisted living", "senior living", "senior housing",
@@ -383,9 +408,13 @@ def scrape_detail_page(page, url):
             page.goto(url, wait_until="domcontentloaded", timeout=20000)
         except PWTimeout:
             pass
-        time.sleep(3)
+        # Wait for network to settle instead of fixed 3s sleep
+        try:
+            page.wait_for_load_state("networkidle", timeout=5000)
+        except PWTimeout:
+            pass
         wait_for_captcha(page, timeout=60)
-        scroll_page(page, times=3, delay=1)
+        scroll_page(page, times=2, delay=0.8)
 
         body_text = page.inner_text("body") or ""
 
@@ -414,7 +443,7 @@ def scrape_detail_page(page, url):
         except Exception:
             pass
         if not info["broker_phone"]:
-            phones = re.findall(r'\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}', search_text)
+            phones = _RE_PHONE.findall(search_text)
             if phones:
                 info["broker_phone"] = phones[0]
 
@@ -429,7 +458,7 @@ def scrape_detail_page(page, url):
         except Exception:
             pass
         if not info["broker_email"]:
-            for e in re.findall(r'[\w.+-]+@[\w-]+\.[\w.]+', search_text):
+            for e in _RE_EMAIL.findall(search_text):
                 if "crexi.com" not in e:
                     info["broker_email"] = e
                     break
@@ -438,7 +467,7 @@ def scrape_detail_page(page, url):
         if contact_text:
             for line in contact_text.split("\n"):
                 line = line.strip()
-                if not line or "@" in line or re.match(r'^[\d(+]', line) or len(line) > 50 or len(line) < 4:
+                if not line or "@" in line or _RE_STARTS_WITH_DIGIT.match(line) or len(line) > 50 or len(line) < 4:
                     continue
                 if any(k in line.lower() for k in ["contact", "listed", "team", "view",
                                                      "request", "schedule", "call", "share",
@@ -459,23 +488,24 @@ def scrape_detail_page(page, url):
                 info["broker_company"] = line.strip()
                 break
 
-        # Beds / Units / SF
-        bed_match = re.search(r'(\d+)[\s-]*(?:bed|licensed)', body_text.lower())
+        # Beds / Units / SF (cache lowered text to avoid repeated .lower())
+        body_lower = body_text.lower()
+        bed_match = _RE_BED_DETAIL.search(body_lower)
         if bed_match:
             info["beds"] = int(bed_match.group(1))
-        unit_match = re.search(r'(\d+)[\s-]*unit', body_text.lower())
+        unit_match = _RE_UNIT.search(body_lower)
         if unit_match:
             info["units"] = int(unit_match.group(1))
-        sf_match = re.search(r'([\d,]+)\s*(?:sqft|sq\s*ft|sf)\b', body_text.lower())
+        sf_match = _RE_SQFT_EXTRACT.search(body_lower)
         if sf_match:
             info["sqft"] = sf_match.group(1) + " SF"
 
         # Address
-        addr_match = re.search(r'(\d+[^,\n]+,\s*[A-Za-z\s]+,\s*[A-Z]{2}\s+\d{5})', body_text)
+        addr_match = _RE_FULL_ADDR.search(body_text)
         if addr_match:
             info["address"] = addr_match.group(1).strip()
 
-        cap_match = re.search(r'([\d.]+)\s*%?\s*cap', body_text.lower())
+        cap_match = _RE_CAP.search(body_lower)
         if cap_match:
             info["cap_rate"] = cap_match.group(1) + "% CAP"
 
@@ -498,26 +528,34 @@ def save_debug(page, body_text=""):
 
 
 def click_next(page):
-    try:
-        for el in page.query_selector_all("a, button"):
-            txt = (el.inner_text() or "").strip()
-            if txt in ["Next", "›", "»", ">", "Next Page"]:
-                if el.is_visible() and el.is_enabled():
-                    el.click()
-                    time.sleep(4)
-                    return True
-    except Exception:
-        pass
+    # Try targeted CSS selectors first (much faster than iterating all elements)
     for sel in ["[aria-label='Next']", "[aria-label='next']",
                 "[class*='next' i]", "[class*='Next']"]:
         try:
             btn = page.query_selector(sel)
             if btn and btn.is_visible():
                 btn.click()
-                time.sleep(4)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=5000)
+                except PWTimeout:
+                    time.sleep(2.5)
                 return True
         except Exception:
             continue
+    # Fallback: iterate all links/buttons looking for "Next" text
+    try:
+        for el in page.query_selector_all("a, button"):
+            txt = (el.inner_text() or "").strip()
+            if txt in ["Next", "›", "»", ">", "Next Page"]:
+                if el.is_visible() and el.is_enabled():
+                    el.click()
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=5000)
+                    except PWTimeout:
+                        time.sleep(2.5)
+                    return True
+    except Exception:
+        pass
     return False
 
 
@@ -682,12 +720,16 @@ def main():
                     url = lst.get("listing_url", "")
                     if not url:
                         continue
+                    # Skip detail scrape if we already have broker contact info
+                    if lst.get("broker_phone") and lst.get("broker_email") and lst.get("broker_name"):
+                        print(f"  [{i+1}/{len(all_listings)}] Skipping (already have broker info)")
+                        continue
                     print(f"  [{i+1}/{len(all_listings)}] {url[:70]}...")
                     detail = scrape_detail_page(pg, url)
                     for k in detail:
                         if detail[k] and not lst.get(k):
                             lst[k] = detail[k]
-                    time.sleep(1.5)
+                    time.sleep(0.75)
 
             filtered = [l for l in all_listings if meets_criteria(l)]
             final = []
