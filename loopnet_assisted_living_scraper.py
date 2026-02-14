@@ -1,7 +1,8 @@
 """
-LoopNet Senior Living / Assisted Living Facility Scraper v1
-============================================================
-Scrapes multiple U.S. states for senior/assisted living facilities on LoopNet.
+LoopNet Healthcare — Assisted Living Facility Scraper v2
+=========================================================
+Scrapes multiple U.S. states for assisted living facilities listed FOR SALE
+under the Healthcare > Assisted Living category on LoopNet.
 Output file includes timestamp so it never conflicts with an open file.
 
 SETUP (run once):
@@ -125,15 +126,10 @@ def _expand_states(states_input):
         )
     return codes
 
-def _state_slug(code):
-    """Convert state code to LoopNet URL slug, e.g. 'NC' -> 'north-carolina', 'PA' -> 'pennsylvania'."""
-    name = _US_STATE_CODES.get(code, code)
-    return name.lower().replace(" ", "-")
-
-# LoopNet uses full state-name slugs in URLs
+# LoopNet uses lowercase 2-letter state codes in search URLs
 STATES = _expand_states(STATES_INPUT)
 SEARCH_URLS = [
-    f"https://www.loopnet.com/search/senior-housing-facilities/{_state_slug(st)}/for-sale/"
+    f"https://www.loopnet.com/search/assisted-living-facilities/{st.lower()}/for-sale/"
     for st in STATES
 ]
 
@@ -141,7 +137,7 @@ SEARCH_URLS = [
 def get_output_filename():
     """Generate timestamped filename so it never conflicts with an open file."""
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return f"loopnet_senior_living_{ts}.xlsx"
+    return f"loopnet_assisted_living_{ts}.xlsx"
 
 
 def wait_for_captcha(page, timeout=180):
@@ -610,7 +606,7 @@ def dedupe(listings):
 def write_excel(listings, filename):
     wb = Workbook()
     ws = wb.active
-    ws.title = "Senior Living - LoopNet"
+    ws.title = "Assisted Living - LoopNet"
 
     hf = Font(name="Arial", bold=True, color="FFFFFF", size=11)
     hfl = PatternFill("solid", fgColor="2F5496")
@@ -623,7 +619,7 @@ def write_excel(listings, filename):
     af = PatternFill("solid", fgColor="F2F7FB")
 
     ws.merge_cells("A1:M1")
-    ws["A1"] = f"LoopNet — Senior / Assisted Living For Sale ({', '.join(STATES)}) — 50+ Beds / 40+ Units"
+    ws["A1"] = f"LoopNet — Healthcare / Assisted Living For Sale ({', '.join(STATES)}) — 50+ Beds / 40+ Units"
     ws["A1"].font = Font(name="Arial", bold=True, size=14, color="2F5496")
     ws["A1"].alignment = Alignment(horizontal="left", vertical="center")
     ws.row_dimensions[1].height = 32
@@ -684,7 +680,8 @@ def write_excel(listings, filename):
 
 def main():
     print("=" * 60)
-    print("  LoopNet Senior Living Scraper v1 (Playwright)")
+    print("  LoopNet Assisted Living Scraper v2 (Playwright)")
+    print(f"  Category: Healthcare > Assisted Living")
     print(f"  States: {', '.join(STATES)}")
     print(f"  Filter: {MIN_BEDS}+ beds OR {MIN_UNITS}+ units")
     print("=" * 60)
